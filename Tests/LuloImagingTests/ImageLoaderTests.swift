@@ -179,7 +179,7 @@ func embeddedRatingAndSidecarExclusion() throws {
     }
 }
 
-/// Ensures folder discovery skips RAW, subdirectories, and symbolic links but retains corrupt supported images.
+/// Ensures discovery separates immediate folders from images and skips hidden entries, packages and links.
 @Test
 func folderDiscoveryAndRecoverableErrors() throws {
     try withFolder { folder in
@@ -187,12 +187,24 @@ func folderDiscoveryAndRecoverableErrors() throws {
         for name in ["raw.dng", "corrupt.jpg", "notes.txt"] {
             try Data().write(to: folder.appendingPathComponent(name))
         }
-        try FileManager.default.createDirectory(
-            at: folder.appendingPathComponent("nested.png"), withIntermediateDirectories: false)
+        for name in ["nested.png", ".hidden", "Archive.app"] {
+            try FileManager.default.createDirectory(
+                at: folder.appendingPathComponent(name), withIntermediateDirectories: false)
+        }
+        let child = folder.appendingPathComponent("nested.png", isDirectory: true)
+        try fixture(at: child.appendingPathComponent("inside.png"))
+        let link = folder.appendingPathComponent("linked-folder")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: child)
         try FileManager.default.createSymbolicLink(
             at: folder.appendingPathComponent("link.png"),
             withDestinationURL: folder.appendingPathComponent("valid.png"))
-        let entries = try ImageLoader.discover(in: folder)
+        let contents = try ImageLoader.contents(in: folder)
+        #expect(contents.folders == [child])
+        let grant = FileAccess(url: folder)
+        #expect(try grant.childFolder(at: child).parent === grant)
+        #expect(throws: (any Error).self) { try grant.childFolder(at: link) }
+        #expect(throws: (any Error).self) { try grant.childFolder(at: folder.deletingLastPathComponent()) }
+        let entries = contents.images
         #expect(Set(entries.map { $0.url.lastPathComponent }) == ["valid.png", "corrupt.jpg"])
         #expect(
             entries.first(where: { $0.url.lastPathComponent == "valid.png" })?.url
