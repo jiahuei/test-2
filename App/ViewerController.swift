@@ -665,7 +665,7 @@ final class ViewerController: NSWindowController, NSWindowDelegate {
                         self.session.replaceEntries(contents.images)
                         if let folder = self.selectedFolder {
                             self.selectedFolder = self.folders.first {
-                                $0.standardizedFileURL.path == folder.standardizedFileURL.path
+                                $0.lastPathComponent == folder.lastPathComponent
                             }
                         }
                         if self.session.selectedURL != selected { self.loadSelection() }
@@ -765,6 +765,7 @@ final class ViewerController: NSWindowController, NSWindowDelegate {
 
     private func updateStatus() {
         let entries = session.visibleEntries
+        if galleryVisible, selectedFolder == nil, session.selectedURL == nil { selectedFolder = folders.first }
         galleryButton.isEnabled = galleryVisible ? session.selectedURL != nil : openedURL != nil || folderAccess != nil
         display.isEnabled = !galleryVisible
         info.isEnabled = !galleryVisible
@@ -915,7 +916,7 @@ final class ViewerController: NSWindowController, NSWindowDelegate {
 
     private var gallerySelection: URL? {
         if let selectedFolder, folders.contains(selectedFolder) { return selectedFolder }
-        return session.selectedURL ?? folders.first
+        return session.selectedURL
     }
 
     private func openGallerySelection() {

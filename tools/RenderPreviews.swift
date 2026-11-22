@@ -310,6 +310,23 @@ enum RenderPreviews {
         try waitUntil { window.attachedSheet == nil }
         guard window.title == root.lastPathComponent && grid.numberOfItems(inSection: 0) == 1
         else { throw PreviewError.galleryFailed(line: #line) }
+
+        // Adding the first image must preserve the initial folder selection.
+        viewer.open(root)
+        try waitUntil { grid.selectionIndexPaths == [IndexPath(item: 0, section: 0)] }
+        try makeFixture(at: root.appendingPathComponent("photo.png"))
+        viewer.refreshImages()
+        try waitUntil { grid.numberOfItems(inSection: 0) == 2 }
+        guard grid.selectionIndexPaths == [IndexPath(item: 0, section: 0)] else {
+            throw PreviewError.galleryFailed(line: #line)
+        }
+        viewer.nextImage()
+        gallery.openSelection?()
+        try waitUntil { !viewer.isGalleryVisible && viewer.canTrashCurrentImage && window.title == "photo.png" }
+        viewer.toggleGallery()
+        guard grid.selectionIndexPaths == [IndexPath(item: 1, section: 0)] else {
+            throw PreviewError.galleryFailed(line: #line)
+        }
     }
 
     /// Ensures sort/filter actions retain a loaded poster and caption, while explicit refresh replaces its pixels.
@@ -1722,6 +1739,11 @@ enum RenderPreviews {
         viewer.useAuthorizedFolder(FileAccess(url: folder))
         try waitUntil { hasLabel("1 of 2") }
         viewer.toggleGallery()
+        let child = folder.appendingPathComponent("Album", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: false)
+        try waitUntil { collection.visibleItems().contains { $0.imageView?.accessibilityLabel() == "Album, folder" } }
+        try FileManager.default.removeItem(at: child)
+        try waitUntil { collection.numberOfItems(inSection: 0) == 2 }
         let third = folder.appendingPathComponent("c.png")
         try makeFixture(at: third, rating: 4)
         try FileManager.default.removeItem(at: second)
