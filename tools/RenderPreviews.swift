@@ -115,6 +115,7 @@ enum RenderPreviews {
         try verifyCachedNavigation(fixture: fixture)
         try verifyObsoleteFolderScan(fixture: fixture)
         try verifyGallery(fixture: fixture, output: output)
+        try verifyFolderNavigation()
         try verifyPreviewRetention()
         try verifyRefreshAnimation(fixture: fixture)
         try verifyRefreshAndRatings(output: output)
@@ -252,6 +253,63 @@ enum RenderPreviews {
         context.fill(CGRect(x: 0, y: 0, width: width, height: height))
         guard let image = context.makeImage() else { throw PreviewError.captureFailed }
         return image
+    }
+
+    /// Ensures both layouts open a folder, return to its selected tile, and retain the gallery after a denied parent request.
+    private static func verifyFolderNavigation() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let child = root.appendingPathComponent("Album", isDirectory: true)
+        try FileManager.default.createDirectory(at: child, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let saved = Preferences(defaults: .standard)
+        defer { saved.save(to: .standard) }
+        let viewer = ViewerController(automaticallyRefresh: false)
+        guard let window = viewer.window, let content = window.contentView,
+            let gallery = descendants(content).compactMap({ $0 as? GalleryView }).first,
+            let grid = descendants(gallery).compactMap({ $0 as? NSCollectionView }).first
+        else { throw PreviewError.galleryFailed(line: #line) }
+        defer { window.close() }
+        func waitUntil(_ ready: () -> Bool) throws {
+            let deadline = Date().addingTimeInterval(10)
+            while !ready() && Date() < deadline { settle() }
+            guard ready() else { throw PreviewError.galleryFailed(line: #line) }
+        }
+        viewer.open(root)
+        for layout in [GalleryLayout.preview, .rows] {
+            if layout == .preview { viewer.showPreview() } else { viewer.showRows() }
+            try waitUntil { grid.visibleItems().first?.imageView?.accessibilityLabel() == "Album, folder" }
+            if layout == .preview {
+                guard
+                    let open = descendants(gallery).compactMap({ $0 as? NSButton }).first(where: { $0.title == "Open" })
+                else { throw PreviewError.galleryFailed(line: #line) }
+                open.performClick(nil)
+            } else {
+                guard
+                    let event = NSEvent.keyEvent(
+                        with: .keyDown, location: .zero, modifierFlags: [], timestamp: 0,
+                        windowNumber: window.windowNumber,
+                        context: nil, characters: "\r", charactersIgnoringModifiers: "\r", isARepeat: false, keyCode: 36
+                    )
+                else { throw PreviewError.galleryFailed(line: #line) }
+                grid.keyDown(with: event)
+            }
+            try waitUntil {
+                viewer.isGalleryVisible && window.title == "Album" && grid.numberOfItems(inSection: 0) == 0
+            }
+            guard viewer.canOpenParent, !viewer.canTrashCurrentImage else {
+                throw PreviewError.galleryFailed(line: #line)
+            }
+            viewer.openParentFolder()
+            try waitUntil {
+                window.title == root.lastPathComponent && grid.selectionIndexPaths == [IndexPath(item: 0, section: 0)]
+            }
+        }
+        viewer.openParentFolder()
+        try waitUntil { window.attachedSheet is NSOpenPanel }
+        (window.attachedSheet as? NSOpenPanel)?.cancel(nil)
+        try waitUntil { window.attachedSheet == nil }
+        guard window.title == root.lastPathComponent && grid.numberOfItems(inSection: 0) == 1
+        else { throw PreviewError.galleryFailed(line: #line) }
     }
 
     /// Ensures sort/filter actions retain a loaded poster and caption, while explicit refresh replaces its pixels.
@@ -1322,7 +1380,7 @@ enum RenderPreviews {
         let gate = ScanCheckpointGate()
         let viewer = ViewerController { folder, isCancelled in
             defer { gate.finish() }
-            return try ImageLoader.discover(
+            return try ImageLoader.contents(
                 in: folder,
                 isCancelled: {
                     gate.checkpoint()
@@ -1383,8 +1441,8 @@ enum RenderPreviews {
         try FileManager.default.copyItem(at: fixture, to: imageURL)
         let gate = ScanCheckpointGate()
         let viewer = ViewerController(
-            discoverImages: { folder, isCancelled in
-                try ImageLoader.discover(
+            readFolder: { folder, isCancelled in
+                try ImageLoader.contents(
                     in: folder,
                     isCancelled: {
                         gate.checkpoint()

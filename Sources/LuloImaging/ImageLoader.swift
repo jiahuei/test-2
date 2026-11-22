@@ -48,6 +48,12 @@ public enum ImageLoadError: LocalizedError {
     }
 }
 
+/// Immediate gallery contents. Folders stay independent of image filters and metadata.
+public struct FolderContents: Sendable {
+    public var images: [ImageEntry] = []
+    public var folders: [URL] = []
+}
+
 public enum ImageLoader {
     // Each decoded image is bounded to roughly 256 MiB for 8-bit RGBA pixels.
     // ImageStore separately bounds cached images; Image I/O uses additional working memory.
@@ -68,42 +74,46 @@ public enum ImageLoader {
     }
 
     public static func discover(in folder: URL, isCancelled: () -> Bool = { false }) throws -> [ImageEntry] {
-        try discover(in: folder, isCancelled: isCancelled, readEntry: { try details(at: $0).entry })
+        try contents(in: folder, isCancelled: isCancelled).images
+    }
+
+    public static func contents(in folder: URL, isCancelled: () -> Bool = { false }) throws -> FolderContents {
+        try contents(in: folder, isCancelled: isCancelled, readEntry: { try details(at: $0).entry })
     }
 
     // The metadata-read boundary allows deterministic cancellation tests without timing Image I/O.
-    static func discover(
+    static func contents(
         in folder: URL, isCancelled: () -> Bool, readEntry: (URL) throws -> ImageEntry
-    ) throws -> [ImageEntry] {
+    ) throws -> FolderContents {
         func checkCancellation() throws {
             if isCancelled() { throw CancellationError() }
         }
         try checkCancellation()
+        let keys: Set<URLResourceKey> = [
+            .isDirectoryKey, .isPackageKey, .isRegularFileKey, .isSymbolicLinkKey, .creationDateKey,
+        ]
         let urls = try FileManager.default.contentsOfDirectory(
-            at: folder, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey, .creationDateKey],
-            options: [.skipsHiddenFiles])
-        let entries = try urls.compactMap { discoveredURL -> ImageEntry? in
+            at: folder, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles])
+        var result = FolderContents()
+        for discoveredURL in urls {
             try checkCancellation()
-            // FileManager may return a resolved path (for example /private/var instead of /var).
-            // Keep entries rooted in the granted folder so the opened image is not added twice.
-            let url = folder.appendingPathComponent(discoveredURL.lastPathComponent)
-            guard let format = ImageFormat(url: url),
-                let values = try? discoveredURL.resourceValues(forKeys: [
-                    .isRegularFileKey, .isSymbolicLinkKey, .creationDateKey,
-                ]
-                ),
-                values.isRegularFile == true, values.isSymbolicLink != true
-            else { return nil }
-            // Keep unreadable supported files navigable so a single bad file does not block the folder.
-            let entry =
-                (try? readEntry(url))
-                ?? ImageEntry(url: url, format: format, createdAt: values.creationDate)
-            try checkCancellation()
-            return entry
+            guard let values = try? discoveredURL.resourceValues(forKeys: keys), values.isSymbolicLink == false
+            else { continue }
+            // Keep entries rooted in the granted folder even when FileManager returns a resolved path.
+            let url = folder.appendingPathComponent(
+                discoveredURL.lastPathComponent, isDirectory: values.isDirectory == true)
+            if values.isDirectory == true {
+                if values.isPackage != true { result.folders.append(url) }
+            } else if values.isRegularFile == true, let format = ImageFormat(url: url) {
+                // Keep unreadable supported files navigable so a single bad file does not block the folder.
+                result.images.append(
+                    (try? readEntry(url)) ?? ImageEntry(url: url, format: format, createdAt: values.creationDate))
+                try checkCancellation()
+            }
         }
-        // Also cover empty folders and a cancellation after the final skipped entry.
         try checkCancellation()
-        return entries
+        result.folders.sort { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        return result
     }
 
     public static func details(at url: URL) throws -> ImageDetails {
@@ -262,11 +272,33 @@ public enum ImageLoader {
 // URL scope methods are thread-safe; the immutable lease is shared with the serial worker.
 public final class FileAccess: @unchecked Sendable {
     public let url: URL
+    public let parent: FileAccess?
     private let scoped: Bool
 
     public init(url: URL) {
         self.url = url
+        parent = nil
         scoped = url.startAccessingSecurityScopedResource()
+    }
+
+    // Child folders use the ancestor's grant. Workers holding a child keep that grant alive.
+    private init(url: URL, parent: FileAccess) {
+        self.url = url
+        self.parent = parent
+        scoped = false
+    }
+
+    public func childFolder(at child: URL) throws -> FileAccess {
+        guard child.lastPathComponent != "..", child.lastPathComponent != ".",
+            child.deletingLastPathComponent().standardizedFileURL == url.standardizedFileURL
+        else {
+            throw CocoaError(.fileReadNoPermission)
+        }
+        let values = try child.resourceValues(forKeys: [.isDirectoryKey, .isSymbolicLinkKey, .isPackageKey])
+        guard values.isDirectory == true, values.isSymbolicLink == false, values.isPackage != true else {
+            throw ImageLoadError.unsupported
+        }
+        return FileAccess(url: child, parent: self)
     }
 
     deinit {

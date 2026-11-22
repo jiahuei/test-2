@@ -37,8 +37,9 @@ public final class ImageChangeMonitor {
                         // Standardizing a deleted file cannot remove /private. Its existing parent can,
                         // so normalize that directory before comparing it with the watched folder.
                         let parent = url.deletingLastPathComponent().standardizedFileURL
+                        let isFolder = flags[index] & UInt32(kFSEventStreamEventFlagItemIsDir) != 0
                         if mustRescan || url == callback.folder
-                            || (parent == callback.folder && ImageFormat(url: url) != nil)
+                            || (parent == callback.folder && (isFolder || ImageFormat(url: url) != nil))
                         {
                             callback.onChange()
                             break
